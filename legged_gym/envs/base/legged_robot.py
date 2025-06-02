@@ -904,3 +904,38 @@ class LeggedRobot(BaseTask):
     def _reward_feet_contact_forces(self):
         # penalize high contact forces
         return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+
+    def _reward_pose(self):
+        # Stay close to the default pose
+        weight = torch.tensor([1.0, 1.0, 0.1] * (self.num_dof // 3), device=self.device)
+        return torch.exp(-torch.sum(torch.square(self.dof_pos - self.default_dof_pos) * weight, dim=1))
+
+    def _reward_energy(self):
+        # Penalize energy consumption
+        return torch.sum(torch.abs(self.dof_vel) * torch.abs(self.torques), dim=1)
+
+    def _reward_feet_slip(self):
+        # Penalize feet slipping
+        cmd_norm = torch.norm(self.commands[:, :2], dim=1)
+        feet_vel = self.contact_forces[:, self.feet_indices, :2]
+        feet_vel_norm_sq = torch.sum(torch.square(feet_vel), dim=-1)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        return torch.sum(feet_vel_norm_sq * contact, dim=1) * (cmd_norm > 0.01)
+
+    def _reward_feet_clearance(self):
+        # Penalize feet not clearing the ground enough during swing
+        feet_vel = self.contact_forces[:, self.feet_indices, :2]
+        feet_vel_norm = torch.sqrt(torch.sum(torch.square(feet_vel), dim=-1))
+        feet_heights = self.root_states[:, 2].unsqueeze(1) - self.measured_heights
+        delta = torch.abs(feet_heights - self.cfg.rewards.max_foot_height)
+        return torch.sum(delta * feet_vel_norm, dim=1)
+
+    def _reward_feet_height(self):
+        # Penalize feet height during swing
+        cmd_norm = torch.norm(self.commands[:, :2], dim=1)
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        first_contact = (self.feet_air_time > 0.) * contact_filt
+        feet_heights = self.root_states[:, 2].unsqueeze(1) - self.measured_heights
+        error = feet_heights / self.cfg.rewards.max_foot_height - 1.0
+        return torch.sum(torch.square(error) * first_contact, dim=1) * (cmd_norm > 0.01)
